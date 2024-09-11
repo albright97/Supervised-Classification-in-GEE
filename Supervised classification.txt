@@ -1,0 +1,110 @@
+// Function to mask clouds using Sentinel-2 QA60 band and cloud probability
+function maskClouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  
+  // Use the cloud probability band to further refine the mask
+  var cloudProb = image.select('MSK_CLDPRB');
+  var cloudProbMask = cloudProb.lt(90);  // Adjust this threshold as needed
+
+  return image.updateMask(mask.and(cloudProbMask)).select(['B2', 'B3', 'B4', 'B8', 'B11', 'B12']);
+}
+
+// Step 1: Load Sentinel-2 Imagery
+var sentinel2 = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterDate('2023-01-01', '2024-08-31')
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 90))  // Increased threshold
+                  .map(maskClouds);
+
+// Step 2: Load Your Study Area Shapefile
+var studyArea = ee.FeatureCollection('users/your_username/your_study_area_shapefile');
+
+// Step 3: Load and Label Each Class's Shapefile
+var unplanted = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Unplanted_land').map(function(feature) {
+  return feature.set('class', 0);
+});
+
+var planted = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Planted_land').map(function(feature) {
+  return feature.set('class', 1);
+});
+
+var trees = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Trees').map(function(feature) {
+  return feature.set('class', 2);
+});
+
+var riverBanks = ee.FeatureCollection('projects/ee-wamweavictor035/assets/River_Banks').map(function(feature) {
+  return feature.set('class', 3);
+});
+
+var roads = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Roads').map(function(feature) {
+  return feature.set('class', 4);
+});
+
+var water = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Water').map(function(feature) {
+  return feature.set('class', 5);
+});
+
+var builtUp = ee.FeatureCollection('projects/ee-wamweavictor035/assets/Built_up_areas').map(function(feature) {
+  return feature.set('class', 6);
+});
+
+// Step 4: Merge All Training Shapefiles into One FeatureCollection
+var trainingPoints = unplanted.merge(planted)
+                              .merge(trees)
+                              .merge(riverBanks)
+                              .merge(roads)
+                              .merge(water)
+                              .merge(builtUp);
+
+// Step 5: Preprocess Sentinel-2 Imagery for Classification
+var sentinel2_image = sentinel2.median().clip(studyArea.geometry());
+
+// Step 6: Sample the Sentinel-2 Image using Training Points
+var training = sentinel2_image.sampleRegions({
+  collection: trainingPoints,
+  properties: ['class'],
+  scale: 10
+});
+
+// Step 7: Train the Classifier
+var classifier = ee.Classifier.smileRandomForest(100).train({
+  features: training,
+  classProperty: 'class',
+  inputProperties: ['B2', 'B3', 'B4', 'B8', 'B11', 'B12']
+});
+
+// Step 8: Classify the Image
+var classified = sentinel2_image.classify(classifier);
+
+// Step 9: Visualize the Classification Results
+Map.centerObject(studyArea, 10);
+Map.addLayer(classified, {min: 0, max: 6, palette: ['blue', 'green', 'red', 'yellow', 'orange', 'cyan', 'gray']}, 'LULC Classification');
+
+// Step 10: Export the Classification Results to Google Drive
+Export.image.toDrive({
+  image: classified,
+  description: 'LULC_Classification',
+  scale: 10,
+  region: studyArea.geometry().bounds(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e9
+});
+
+// Step 11: Download True Color Sentinel-2 Imagery
+var trueColor = sentinel2.select(['B4', 'B3', 'B2'])
+                         .median()
+                         .clip(studyArea.geometry());
+
+Map.addLayer(trueColor, {min: 0, max: 3000}, 'True Color');
+
+Export.image.toDrive({
+  image: trueColor,
+  description: 'TrueColorSentinel',
+  scale: 10,
+  region: studyArea.geometry().bounds(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e9
+});
